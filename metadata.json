@@ -1,0 +1,5 @@
+{
+  "name": "GSD Motion Analyzer",
+  "description": "AI-powered GSD and SMV analysis for industrial operations. Upload video cycles to automatically extract motion codes and timing.",
+  "requestFramePermissions": []
+}

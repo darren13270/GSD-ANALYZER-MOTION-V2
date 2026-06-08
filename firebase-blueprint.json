@@ -1,0 +1,24 @@
+{
+  "entities": {
+    "Analysis": {
+      "title": "Analysis",
+      "description": "A saved GSD analysis",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "operationName": { "type": "string" },
+        "styleNumber": { "type": "string" },
+        "skillGrade": { "type": "number" },
+        "resultJson": { "type": "string" },
+        "createdAt": { "type": "number" }
+      },
+      "required": ["userId", "operationName", "styleNumber", "skillGrade", "resultJson", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/analyses/{analysisId}": {
+      "schema": { "$ref": "#/entities/Analysis" },
+      "description": "Saved analyses"
+    }
+  }
+}

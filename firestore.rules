@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: analyses
+    // Document ID: auto-generated
+    // Fields:
+    //   - userId: string (required) - ID of the user who created the analysis
+    //   - operationName: string (required) - Name of the operation
+    //   - styleNumber: string (required) - Style number
+    //   - skillGrade: number (required) - Skill grade percentage (0-100)
+    //   - resultJson: string (required) - JSON stringified analysis results
+    //   - createdAt: number (required) - Timestamp of creation
+    //
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidAnalysis() {
+      return hasRequiredFields(['userId', 'operationName', 'styleNumber', 'skillGrade', 'resultJson', 'createdAt']) &&
+             hasOnlyAllowedFields(['userId', 'operationName', 'styleNumber', 'skillGrade', 'resultJson', 'createdAt']) &&
+             request.resource.data.userId is string &&
+             request.resource.data.operationName is string && request.resource.data.operationName.size() <= 100 &&
+             request.resource.data.styleNumber is string && request.resource.data.styleNumber.size() <= 100 &&
+             request.resource.data.skillGrade is number && request.resource.data.skillGrade >= 0 && request.resource.data.skillGrade <= 100 &&
+             request.resource.data.resultJson is string && request.resource.data.resultJson.size() <= 1000000 && // 1MB limit
+             request.resource.data.createdAt is number;
+    }
+
+    function isValidVideoCache() {
+      return hasRequiredFields(['resultJson', 'createdAt']) &&
+             hasOnlyAllowedFields(['resultJson', 'createdAt']) &&
+             request.resource.data.resultJson is string && request.resource.data.resultJson.size() <= 1000000 &&
+             request.resource.data.createdAt is number;
+    }
+
+    match /videoCache/{cacheId} {
+      allow read: if true;
+      allow create: if isValidVideoCache();
+      allow update: if isValidVideoCache();
+    }
+
+    match /analyses/{analysisId} {
+      // Allow public read so links can be shared with colleagues
+      allow read: if true;
+      
+      // Only authenticated users can create, and they must set themselves as the owner
+      allow create: if isAuthenticated() && isValidAnalysis() && request.resource.data.userId == request.auth.uid;
+      
+      // Only the owner can update or delete
+      allow update: if isOwner(resource.data.userId) && isValidAnalysis() && request.resource.data.userId == resource.data.userId;
+      allow delete: if isOwner(resource.data.userId);
+    }
+  }
+}
