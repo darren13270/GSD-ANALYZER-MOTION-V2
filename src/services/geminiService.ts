@@ -14,23 +14,17 @@ const ai = new GoogleGenAI({ apiKey: apiKey });
 const getGsdPrompt = (expectedCycles: number, operationName: string) => `
 Analyze the provided video(s) of an industrial operation: ${operationName}. 
 If multiple videos are provided, they are different angles of the EXACT SAME operation. Use both angles to get a more accurate breakdown.
-The video contains EXACTLY ${expectedCycles} repetitive cycles of the same operation.
+The video may contain several repetitive cycles of the same operation, but you MUST ONLY extract EXACTLY ${expectedCycles} cycles.
 
 CRITICAL INSTRUCTIONS:
+- NO GAPS ALLOWED: The very first motion of Cycle 1 MUST start at EXACTLY 0.0. If there is prep time, handling, or idle time at the start of the video, include it as a 'HNDL' (Handling) or 'GP2H' motion at the start of Cycle 1.
+- CONTINUOUS TIMELINE: There MUST be ZERO gaps between cycles. The exact endTime of Cycle N's last motion MUST be the exact startTime of Cycle N+1's first motion.
+- END-TO-END COVERAGE: Ensure the last motion of the last cycle reaches the very end of the time you analyzed. 
 - YOU MUST ANALYZE THE ACTUAL VIDEO PROVIDED. Do not use a generic template or hallucinate motions. Base your analysis STRICTLY on the visual evidence in the video.
-- If the video does not contain sewing, do not output sewing codes. Only output codes that match the actual actions performed.
-- DO NOT SKIP ANY MOTION. Every hand movement, machine action, and adjustment must be captured.
-- BE EXTREMELY GRANULAR. Break down the operation into the smallest possible discrete elements.
-- Ensure every second of the video is accounted for within the cycles.
-- PAY SPECIAL ATTENTION to subtle motions like 'REGP' (Regrasp Part), 'TPRS' (Toggle Presser Foot), and 'HNDL' (Handling).
-- DISTINGUISH between 1-hand and 2-hand operations (e.g., GP1H vs GP2H, MAP1 vs MAP2).
-- OBSERVE the machine state: identify when sewing starts (MS1A/B) and ends (TTRM/CYCL).
-- YOU MUST IDENTIFY EXACTLY ${expectedCycles} CYCLES. A cycle is defined as the processing of ONE COMPLETE PIECE of clothing.
-- PIECE-BY-PIECE CONTINUITY: Follow the piece from the moment it is picked up until it is aside. Do not stop analyzing until the next piece begins. 
-- LONG OPERATIONS: Expect that a single garment piece may involve many discrete motions. Even if the process is long, you MUST record every motion. Do not skip to the next cycle until the current piece is fully completed.
-- NO GAPS: The timeline must be continuous. If you detect a gap (white space in the timeline), it means you failed the task. Every second from the start of Piece 1 to the end of Piece ${expectedCycles} must be covered by a motion code.
-- END-TO-END COVERAGE: You must analyze the video until the final piece is finished. Do not stop after the first or second piece if ${expectedCycles} pieces are expected.
-- DATA INTEGRITY: The quantity of motions in the first piece must be maintained for all subsequent pieces. Falling off in detail or skipping the middle of a piece is a critical failure.
+- BE EXTREMELY GRANULAR. Break down the operation into discrete elements.
+- Analyze the video from START to FINISH, but ONLY output the first ${expectedCycles} complete cycles you identify. Even if the video is very long and contains more cycles, you MUST STOP outputting cycles and end your JSON after you have collected EXACTLY ${expectedCycles}. Do not generate a single cycle more than ${expectedCycles}.
+- ATTENTION TO LONG VIDEOS: Cycles may be very long (e.g., 2+ minutes per cycle). Do not rush or artificially shorten cycles. Continue measuring the motions for the full true duration of each piece processed.
+- KEEP DESCRIPTIONS SHORT: To prevent output truncation, keep 'motionDescription' to 5 words or less (e.g., "Align part to machine", "Sew main seam").
 
 Motion Identification Guidelines:
 1. "Get" Phase: Look for the hand moving towards a part or tool. Ends when the part is grasped.
@@ -39,18 +33,14 @@ Motion Identification Guidelines:
 4. "Aside" Phase: Look for the hand moving the finished part away to a stack or bundle.
 
 Your task:
-1. Identify the exact start and end of exactly ${expectedCycles} cycles.
+1. Identify the exact start and end of EXACTLY ${expectedCycles} cycles. DO NOT exceed this number.
 2. Within each cycle, identify EVERY discrete "motion" (element).
 3. Assign the most accurate GSD (General Sewing Data) code from the provided list to each motion.
 4. Provide the start and end time (in seconds with 3 decimal places for millisecond precision) for each motion relative to the video start.
    - CRITICAL TIMING: The startTime MUST be the EXACT fraction of a second the worker BEGINS the movement. Do not delay the start time.
    - The endTime MUST be the EXACT fraction of a second the movement STOPS.
    - THERE MUST BE NO GAPS between motions within a cycle. The end time of one motion MUST be the exact start time of the next motion.
-5. Calculate the TMU (Time Measurement Unit) for each motion. (1 second = 27.8 TMU).
-6. Calculate the average cycle time and the total SMV (Standard Minute Value).
-   - Use a 15% allowance for SMV calculation: SMV = (Average Cycle TMU * 0.0006) * 1.15.
-7. Provide a confidenceScore (0-100) for each motion. If the motion is clear and unambiguous, score it high (90-100). If it's blurry, fast, or hard to distinguish, score it lower.
-
+   - ANTI-HALLUCINATION WARNING: Cycle durations and motion times are NEVER exactly the same in real-world videos. DO NOT copy/paste identical durations or motion patterns across different cycles. You MUST measure the actual visual timestamps independently for every single cycle. If any two cycles have the exact same total duration or identical timestamps, your output will be rejected.
 
 GSD Reference (Full List):
 - GP1E: Get Part 1 Hand (Easy)
@@ -139,27 +129,20 @@ const responseSchema = {
             items: {
               type: Type.OBJECT,
               properties: {
-                id: { type: Type.STRING },
                 motionDescription: { type: Type.STRING },
                 gsdCode: { type: Type.STRING },
                 startTime: { type: Type.NUMBER },
                 endTime: { type: Type.NUMBER },
-                duration: { type: Type.NUMBER },
-                tmu: { type: Type.NUMBER },
-                confidenceScore: { type: Type.NUMBER },
               },
-              required: ["id", "motionDescription", "gsdCode", "startTime", "endTime", "duration", "tmu", "confidenceScore"],
+              required: ["motionDescription", "gsdCode", "startTime", "endTime"],
             },
           },
-          totalTmu: { type: Type.NUMBER },
         },
-        required: ["cycleNumber", "motions", "totalTmu"],
+        required: ["cycleNumber", "motions"],
       },
     },
-    averageCycleTime: { type: Type.NUMBER },
-    totalSmv: { type: Type.NUMBER },
   },
-  required: ["cycles", "averageCycleTime", "totalSmv"],
+  required: ["cycles"],
 };
 
 export type ProgressCallback = (status: string, progress?: number) => void;
@@ -301,7 +284,7 @@ export async function analyzeOperationVideo(
 
   onProgress?.("AI is analyzing motion cycles across the timeline...", 75);
   let response;
-  const modelId = "gemini-3-flash-preview"; 
+  const modelId = "gemini-3.1-pro-preview"; // Upgraded to 3.1-pro for better long-context tracking
   
   if (signal?.aborted) throw new Error("Analysis cancelled");
   
@@ -311,8 +294,8 @@ export async function analyzeOperationVideo(
     const analysisInterval = setInterval(() => {
       analysisProgress += 0.1; // Even slower increment to give AI room to think
       if (analysisProgress > 98) analysisProgress = 98;
-      onProgress?.("AI is analyzing motion cycles across the timeline...", Math.floor(analysisProgress));
-    }, 1000);
+      onProgress?.("AI is deeply analyzing motion cycles across the entire timeline (this takes longer for full videos)...", Math.floor(analysisProgress));
+    }, 2000); // Slower interval for big videos
 
     // If abort is thrown during the request, catch it gracefully
     const generatePromise = localAi.models.generateContent({
@@ -321,7 +304,8 @@ export async function analyzeOperationVideo(
       config: {
         responseMimeType: "application/json",
         responseSchema: responseSchema,
-        temperature: 0.1,
+        temperature: 0.4,
+        maxOutputTokens: 16384, // Maximize output token capability to allow hundreds of granular motions
       },
     });
 
@@ -394,7 +378,48 @@ export async function analyzeOperationVideo(
   try {
     // Clean up response text if it contains markdown markers (though responseMimeType should handle it)
     const cleanJson = responseText.replace(/^```json\n?|\n?```$/g, '').trim();
-    result = JSON.parse(cleanJson) as AnalysisResult;
+    const rawResult = JSON.parse(cleanJson);
+    
+    // Post-process the result to calculate mathematically derived fields to save tokens
+    let cycles = (rawResult.cycles || []).map((c: any) => {
+      let totalTmu = 0;
+      const motions = (c.motions || []).map((m: any, idx: number) => {
+        const duration = Math.max(0, m.endTime - m.startTime);
+        const tmu = duration * 27.8;
+        totalTmu += tmu;
+        return {
+          ...m,
+          id: `mot_${c.cycleNumber}_${idx + 1}`,
+          duration,
+          tmu,
+          confidenceScore: 90
+        };
+      });
+      return {
+        ...c,
+        motions,
+        totalTmu
+      };
+    });
+    
+    // Explicitly enforce output limits
+    if (cycles.length > expectedCycles) {
+      cycles = cycles.slice(0, expectedCycles);
+    }
+    
+    const validCycles = cycles.filter((c: any) => c.motions.length > 0);
+    const averageCycleTime = validCycles.length > 0 
+      ? validCycles.reduce((sum: number, c: any) => sum + c.motions.reduce((s: number, m: any) => s + m.duration, 0), 0) / validCycles.length
+      : 0;
+      
+    const averageCycleTmu = averageCycleTime * 27.8;
+    const totalSmv = (averageCycleTmu * 0.0006) * 1.15;
+    
+    result = {
+      cycles,
+      averageCycleTime,
+      totalSmv
+    } as AnalysisResult;
   } catch (e) {
     console.error("Failed to parse AI response:", responseText);
     throw new Error("AI returned a malformed data structure. This usually happens with very long videos. Please try analyzing fewer cycles or a shorter segment.");

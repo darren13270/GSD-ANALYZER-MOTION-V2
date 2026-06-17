@@ -155,8 +155,6 @@ export default function App() {
   
   const lastTimeRef = useRef<number>(0);
   const lastMotionIdRef = useRef<string | null>(null);
-  const isPausingRef = useRef<boolean>(false);
-  const pauseTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const analysisAbortControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -250,11 +248,11 @@ export default function App() {
       const safeOpName = (operationName || "default").replace(/[^a-zA-Z0-9_-]/g, '').toLowerCase();
       
       // Versioned key to allow system-wide resets for logic updates
-      return `v3-gsd-analysis-${hashHex}-${videoFile.size}-cycles-${expectedCycles}`;
+      return `v9-gsd-analysis-${hashHex}-${videoFile.size}-cycles-${expectedCycles}`;
     } catch (e) {
       console.warn("Hashing failed, using size and modified date as fallback key");
       // Absolute final fallback: size and modified timestamp, but ZERO reliance on filename.
-      return `v3-gsd-analysis-fallback-${videoFile.size}-${videoFile.lastModified || '0'}-cycles-${expectedCycles}`;
+      return `v9-gsd-analysis-fallback-${videoFile.size}-${videoFile.lastModified || '0'}-cycles-${expectedCycles}`;
     }
   };
 
@@ -596,15 +594,10 @@ export default function App() {
       const fps = 30;
       const duration = video.duration;
       
-      const allMotions = result.cycles.flatMap(c => c.motions);
-      const pauseTimes: number[] = Array.from<number>(new Set(allMotions.map(m => m.endTime))).sort((a: number, b: number) => a - b);
-      let nextPauseIndex = 0;
-      
       let videoTime = 0;
       let outputFrame = 0;
-      let pauseFramesRemaining = 0;
       
-      const totalOutputFrames = Math.floor(duration * fps) + (pauseTimes.length * Math.floor(1.5 * fps));
+      const totalOutputFrames = Math.floor(duration * fps);
 
       video.pause();
       if (video2) video2.pause();
@@ -642,14 +635,42 @@ export default function App() {
         const gradeBoxWidth = gradeMetrics.width + gradePaddingX * 2;
         const gradeBoxHeight = 16 * scale + gradePaddingY * 2;
         const gradeX = canvas.width - 24 * scale;
-        const gradeY = 24 * scale;
+        let rightSideY = 24 * scale;
         
         ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
-        ctx.fillRect(gradeX - gradeMetrics.width - gradePaddingX, gradeY, gradeBoxWidth, gradeBoxHeight);
+        ctx.fillRect(gradeX - gradeMetrics.width - gradePaddingX, rightSideY, gradeBoxWidth, gradeBoxHeight);
         
         ctx.fillStyle = '#28A745';
-        ctx.fillText(gradeText, gradeX, gradeY + gradePaddingY);
+        ctx.fillText(gradeText, gradeX, rightSideY + gradePaddingY);
         
+        rightSideY += gradeBoxHeight + 8 * scale;
+        
+        // Cycle summaries
+        ctx.font = `bold ${12 * scale}px monospace`;
+        const cycleSummaries = result.cycles.filter(c => c.motions.length > 0 && currentTime >= c.motions[c.motions.length - 1].endTime).map(c => `Cycle ${c.cycleNumber} = ${c.motions.reduce((s, m) => s + m.duration, 0).toFixed(3)}s`);
+        
+        for (const sumText of cycleSummaries) {
+          const sumMetrics = ctx.measureText(sumText);
+          const sumPaddingX = 8 * scale;
+          const sumPaddingY = 4 * scale;
+          const sumBoxWidth = sumMetrics.width + sumPaddingX * 2;
+          const sumBoxHeight = 12 * scale + sumPaddingY * 2;
+          
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+          ctx.strokeStyle = 'rgba(0, 255, 0, 0.3)';
+          ctx.lineWidth = 1 * scale;
+          
+          const sumBoxX = gradeX - sumMetrics.width - sumPaddingX;
+          
+          ctx.fillRect(sumBoxX, rightSideY, sumBoxWidth, sumBoxHeight);
+          ctx.strokeRect(sumBoxX, rightSideY, sumBoxWidth, sumBoxHeight);
+          
+          ctx.fillStyle = '#00FF00';
+          ctx.fillText(sumText, gradeX, rightSideY + sumPaddingY);
+          
+          rightSideY += sumBoxHeight + 4 * scale;
+        }
+
         ctx.restore();
         
         let currentCycle = null;
@@ -678,11 +699,30 @@ export default function App() {
           const cycleText = `CYCLE ${currentCycle.cycleNumber}`;
           const cycleMetrics = ctx.measureText(cycleText);
           
+          const min = Math.floor(currentTime / 60);
+          const sec = Math.floor(currentTime % 60);
+          const ms = Math.floor((currentTime % 1) * 1000);
+          const timeText = `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
+          
+          ctx.font = `bold ${fontSize}px monospace`;
+          const timeMetrics = ctx.measureText(timeText);
+          
           ctx.fillStyle = '#0066FF';
           ctx.fillRect(startX, currentY, cycleMetrics.width + paddingX * 2, fontSize + paddingY * 2);
           ctx.fillStyle = '#FFFFFF';
+          ctx.font = `bold ${fontSize}px sans-serif`;
           ctx.textBaseline = 'top';
           ctx.fillText(cycleText, startX + paddingX, currentY + paddingY);
+          
+          const timeStartX = startX + cycleMetrics.width + paddingX * 2 + 8 * scale;
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+          ctx.fillRect(timeStartX, currentY, timeMetrics.width + paddingX * 2, fontSize + paddingY * 2);
+          ctx.strokeStyle = 'rgba(0, 255, 0, 0.3)';
+          ctx.lineWidth = 1 * scale;
+          ctx.strokeRect(timeStartX, currentY, timeMetrics.width + paddingX * 2, fontSize + paddingY * 2);
+          ctx.fillStyle = '#00FF00';
+          ctx.font = `bold ${fontSize}px monospace`;
+          ctx.fillText(timeText, timeStartX + paddingX, currentY + paddingY);
           
           currentY += fontSize + paddingY * 2 + 10 * scale;
 
@@ -722,7 +762,7 @@ export default function App() {
       };
 
       const processNextFrame = async () => {
-        if (videoTime >= duration && pauseFramesRemaining <= 0) {
+        if (videoTime >= duration) {
           await videoEncoder.flush();
           muxer.finalize();
           
@@ -752,16 +792,7 @@ export default function App() {
           return;
         }
 
-        if (pauseFramesRemaining > 0) {
-          pauseFramesRemaining--;
-        } else {
-          videoTime += 1 / fps;
-          if (nextPauseIndex < pauseTimes.length && videoTime >= pauseTimes[nextPauseIndex]) {
-            videoTime = pauseTimes[nextPauseIndex];
-            pauseFramesRemaining = Math.floor(1.5 * fps);
-            nextPauseIndex++;
-          }
-        }
+        videoTime += 1 / fps;
 
         const currentTime = videoTime;
         
@@ -968,6 +999,15 @@ export default function App() {
         const currentMotionId = currentMotionIndex !== -1 ? currentCycle.motions[currentMotionIndex].id : null;
         setActiveMotionId(currentMotionId);
 
+        // Update stopwatch display
+        const stopwatchEl = document.getElementById('stopwatch-display');
+        if (stopwatchEl) {
+          const min = Math.floor(currentTime / 60);
+          const sec = Math.floor(currentTime % 60);
+          const ms = Math.floor((currentTime % 1) * 1000);
+          stopwatchEl.textContent = `${min.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
+        }
+
         // Only show motions that have already started
         const pastMotions = currentCycle.motions.filter(m => currentTime >= m.startTime);
         
@@ -983,48 +1023,12 @@ export default function App() {
 
         setActiveCycleNumber(currentCycle.cycleNumber);
         
-        if (isPlayingNormally && lastMotionIdRef.current && currentMotionId && currentMotionId !== lastMotionIdRef.current && !isPausingRef.current) {
-          const video = videoRef.current;
-          const video2 = videoRef2.current;
-          if (video && !video.paused) {
-            video.pause();
-            if (video2 && !video2.paused) video2.pause();
-            isPausingRef.current = true;
-            if (pauseTimeoutRef.current) clearTimeout(pauseTimeoutRef.current);
-            pauseTimeoutRef.current = setTimeout(() => {
-              if (isPausingRef.current && videoRef.current) {
-                isPausingRef.current = false;
-                videoRef.current.play().catch(e => console.error("Auto-resume failed:", e));
-                if (videoRef2.current) videoRef2.current.play().catch(e => console.error("Auto-resume video2 failed:", e));
-              }
-            }, 1500);
-          }
-        }
-        
         if (currentMotionId) {
           lastMotionIdRef.current = currentMotionId;
         }
       } else {
         setActiveCycleNumber(null);
         setActiveMotionId(null);
-        
-        if (isPlayingNormally && lastMotionIdRef.current && !isPausingRef.current) {
-          const video = videoRef.current;
-          const video2 = videoRef2.current;
-          if (video && !video.paused) {
-            video.pause();
-            if (video2 && !video2.paused) video2.pause();
-            isPausingRef.current = true;
-            if (pauseTimeoutRef.current) clearTimeout(pauseTimeoutRef.current);
-            pauseTimeoutRef.current = setTimeout(() => {
-              if (isPausingRef.current && videoRef.current) {
-                isPausingRef.current = false;
-                videoRef.current.play().catch(e => console.error("Auto-resume failed:", e));
-                if (videoRef2.current) videoRef2.current.play().catch(e => console.error("Auto-resume video2 failed:", e));
-              }
-            }, 1500);
-          }
-        }
         
         lastMotionIdRef.current = null;
       }
@@ -1045,17 +1049,9 @@ export default function App() {
     const video = videoRef.current;
     if (video) {
       const onPlay = (e: Event) => {
-        if (e.isTrusted && isPausingRef.current) {
-          isPausingRef.current = false;
-          if (pauseTimeoutRef.current) clearTimeout(pauseTimeoutRef.current);
-        }
         animationFrameId = requestAnimationFrame(loop);
       };
       const onPause = (e: Event) => {
-        if (e.isTrusted && isPausingRef.current) {
-          isPausingRef.current = false;
-          if (pauseTimeoutRef.current) clearTimeout(pauseTimeoutRef.current);
-        }
         cancelAnimationFrame(animationFrameId);
         updateTime();
       };
@@ -1063,10 +1059,22 @@ export default function App() {
         lastTimeRef.current = videoRef.current?.currentTime || 0;
         updateTime();
       };
+      const onSeeking = () => {
+        if (video.paused) {
+          updateTime();
+        }
+      };
+      const onTimeUpdate = () => {
+        if (video.paused) {
+          updateTime();
+        }
+      };
       
       video.addEventListener('play', onPlay);
       video.addEventListener('pause', onPause);
       video.addEventListener('seeked', onSeeked);
+      video.addEventListener('seeking', onSeeking);
+      video.addEventListener('timeupdate', onTimeUpdate);
       
       if (!video.paused) {
         animationFrameId = requestAnimationFrame(loop);
@@ -1076,6 +1084,8 @@ export default function App() {
         video.removeEventListener('play', onPlay);
         video.removeEventListener('pause', onPause);
         video.removeEventListener('seeked', onSeeked);
+        video.removeEventListener('seeking', onSeeking);
+        video.removeEventListener('timeupdate', onTimeUpdate);
         cancelAnimationFrame(animationFrameId);
       };
     }
@@ -1259,6 +1269,11 @@ export default function App() {
                     <div className="bg-black/60 text-[#28A745] font-bold px-[clamp(4px,1cqw,12px)] py-[clamp(2px,0.5cqw,6px)] rounded border border-[#28A745]/30 shadow-sm text-[clamp(8px,1.8cqw,16px)]">
                       SKILL GRADE : {skillGrade}%
                     </div>
+                    {result && result.cycles.filter(c => c.motions.length > 0 && (!videoRef.current || videoRef.current.currentTime >= c.motions[c.motions.length - 1].endTime)).map(c => (
+                      <div key={c.cycleNumber} className="bg-black/60 text-[#00FF00] font-mono font-bold px-[clamp(4px,1cqw,12px)] py-[clamp(2px,0.5cqw,6px)] text-[clamp(8px,1.4cqw,12px)] rounded border border-[#00FF00]/30 shadow-sm whitespace-nowrap">
+                        Cycle {c.cycleNumber} = {c.motions.reduce((s, m) => s + m.duration, 0).toFixed(3)}s
+                      </div>
+                    ))}
                   </div>
                   
                   {/* Custom Video Controls */}
@@ -1343,8 +1358,13 @@ export default function App() {
                         className="absolute top-4 left-4 flex flex-col gap-y-[clamp(2px,0.5cqw,4px)] z-20 overflow-y-auto max-h-[90%] no-scrollbar pr-4 pointer-events-auto"
                       >
                         {activeCycleNumber && (
-                          <div className="bg-[#0066FF] text-white font-bold px-[clamp(6px,1.5cqw,16px)] py-[clamp(2px,0.5cqw,8px)] text-[clamp(8px,1.8cqw,16px)] leading-tight uppercase tracking-wider shadow-sm w-fit mb-1 pointer-events-none">
-                            CYCLE {activeCycleNumber}
+                          <div className="flex gap-2 mb-1 pointer-events-none items-stretch">
+                            <div className="bg-[#0066FF] text-white font-bold px-[clamp(6px,1.5cqw,16px)] py-[clamp(2px,0.5cqw,8px)] text-[clamp(8px,1.8cqw,16px)] leading-tight uppercase tracking-wider shadow-sm w-fit flex items-center">
+                              CYCLE {activeCycleNumber}
+                            </div>
+                            <div id="stopwatch-display" className="bg-black/80 text-[#00FF00] font-mono font-bold px-[clamp(6px,1.5cqw,16px)] py-[clamp(2px,0.5cqw,8px)] text-[clamp(8px,1.8cqw,16px)] leading-tight tracking-wider shadow-sm flex items-center border border-[#00FF00]/30 min-w-[90px] justify-center">
+                              00:00.000
+                            </div>
                           </div>
                         )}
                         {activeMotionsOverlay.map((motion) => {
@@ -1486,9 +1506,9 @@ export default function App() {
                       <input 
                         type="number" 
                         min="1" 
-                        max="10" 
+                        max="100" 
                         value={expectedCycles}
-                        onChange={(e) => setExpectedCycles(Math.max(1, Math.min(10, parseInt(e.target.value) || 3)))}
+                        onChange={(e) => setExpectedCycles(Math.max(1, Math.min(100, parseInt(e.target.value) || 3)))}
                         className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-[#0066FF]/50 h-10 text-center"
                       />
                     </div>
